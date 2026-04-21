@@ -1,0 +1,27 @@
+# Foundry
+cache/
+out/
+broadcast/*/*/
+!broadcast/*/*/run-latest.json
+.forge-snapshots/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Keys / secrets (belt-and-suspenders)
+*.pem
+*.key

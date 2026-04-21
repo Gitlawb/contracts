@@ -1,0 +1,33 @@
+{
+  "name": "@gitlawb/contracts",
+  "version": "0.1.0",
+  "description": "ABIs and deployed addresses for the gitlawb protocol on Base L2",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gitlawb/gitlawb-contracts"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "keywords": ["gitlawb", "ethereum", "base", "staking", "abi", "defi"],
+  "publishConfig": {
+    "access": "public"
+  }
+}
