@@ -71,6 +71,7 @@ contract GitlawbStaking {
     error TransferFailed();
     error ZeroAddress();
     error BelowMinimumStake();
+    error UnstakePending(); // PR #12 — mirrors NodeStaking
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -118,6 +119,16 @@ contract GitlawbStaking {
         StakeInfo storage info = stakes[msg.sender];
         if (amount == 0) revert InvalidAmount();
         if (amount > info.amount) revert InsufficientStake();
+
+        // PR #12 fix : reject a second requestUnstake while one is already
+        // pending. Previously this would silently overwrite unstakeRequestAt
+        // (restarting the 7-day cooldown) AND replace unstakeAmount, which
+        // either accidentally extended the wait OR let a user effectively
+        // change their mind without paying any time penalty. Mirrors the
+        // UnstakePending guard already present in GitlawbNodeStaking.
+        // Cancel-and-resubmit will need an explicit cancelUnstake() function
+        // (tracked as a separate UX improvement).
+        if (info.unstakeRequestAt != 0) revert UnstakePending();
 
         // Harvest pending rewards first
         _harvest(msg.sender);
