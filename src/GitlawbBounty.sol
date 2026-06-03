@@ -37,6 +37,7 @@ contract GitlawbBounty {
         uint256 submittedAt;
         uint256 completedAt;
         uint256 deadline;        // seconds from claim — auto-dispute after
+        uint256 feeBpsSnapshot;  // PR #11 : fee in effect when bounty was created
     }
 
     // ── Storage ──────────────────────────────────────────────────────────────
@@ -142,7 +143,8 @@ contract GitlawbBounty {
             claimedAt: 0,
             submittedAt: 0,
             completedAt: 0,
-            deadline: defaultDeadline
+            deadline: defaultDeadline,
+            feeBpsSnapshot: protocolFeeBps // PR #11 : lock the fee at escrow time
         });
 
         emit BountyCreated(bountyId, msg.sender, amount, repoOwner, repoName, issueId, title);
@@ -184,7 +186,10 @@ contract GitlawbBounty {
     ) external onlyBountyCreator(bountyId) inStatus(bountyId, Status.Submitted) {
         Bounty storage b = bounties[bountyId];
 
-        uint256 fee = (b.amount * protocolFeeBps) / 10000;
+        // PR #11 fix : honor the fee that was in effect when the bounty was
+        // created. Stops the owner-induced rugpull where setProtocolFee bumps
+        // the fee on already-escrowed funds, stealing from the agent's payout.
+        uint256 fee = (b.amount * b.feeBpsSnapshot) / 10000;
         uint256 payout = b.amount - fee;
 
         b.status = Status.Completed;
