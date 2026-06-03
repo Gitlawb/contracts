@@ -157,10 +157,20 @@ contract GitlawbStaking {
         info.unstakeAmount = 0;
         info.unstakeRequestAt = 0;
 
-        bool ok = token.transfer(msg.sender, amount);
+        // PR #5 fix : auto-pay pendingRewards along with the unstake so a user
+        // who fully exits doesn't leave rewards stranded in storage. Mirrors
+        // GitlawbNodeStaking.unstake() which pays stake + rewards in one tx.
+        // Without this, full-exit stakers who forget to call claimRewards lose
+        // access in practice (stake = 0 but pendingRewards > 0 sitting forever).
+        uint256 rewards = info.pendingRewards;
+        info.pendingRewards = 0;
+
+        uint256 payout = amount + rewards;
+        bool ok = token.transfer(msg.sender, payout);
         if (!ok) revert TransferFailed();
 
         emit Unstaked(msg.sender, amount);
+        if (rewards > 0) emit RewardsClaimed(msg.sender, rewards);
     }
 
     /// Claim accumulated rewards.
