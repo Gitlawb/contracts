@@ -38,6 +38,8 @@ contract GitlawbNameRegistry {
     error NotOwner(bytes32 nameHash, address caller);
     error NotRegistered(bytes32 nameHash);
     error InvalidName();
+    error DIDAlreadyClaimed(bytes32 didHash); // PR #8
+    error EmptyDID(); // PR #8
 
     // ── Functions ─────────────────────────────────────────────────────────────
 
@@ -46,8 +48,17 @@ contract GitlawbNameRegistry {
     /// @param did   Full DID string to associate with this name
     function register(string calldata name, string calldata did) external {
         _validateName(name);
+        if (bytes(did).length == 0) revert EmptyDID(); // PR #8 fix
         bytes32 nameHash = keccak256(bytes(name));
         if (_records[nameHash].owner != address(0)) revert NameTaken(nameHash);
+
+        // PR #8 fix : reject if this DID is already mapped to another name.
+        // Without this guard, an attacker can register "trusted-name-phish"
+        // pointing at the same DID a legitimate name owns, overwriting the
+        // didToName reverse mapping and turning consumers' reverseLookup(did)
+        // into a phishing surface.
+        bytes32 didHash = keccak256(bytes(did));
+        if (bytes(didToName[didHash]).length != 0) revert DIDAlreadyClaimed(didHash);
 
         _records[nameHash] = NameRecord({
             owner: msg.sender,
@@ -56,8 +67,6 @@ contract GitlawbNameRegistry {
             updatedAt: block.timestamp
         });
 
-        // Reverse mapping
-        bytes32 didHash = keccak256(bytes(did));
         didToName[didHash] = name;
 
         emit NameRegistered(name, did, msg.sender, block.timestamp);
@@ -65,20 +74,30 @@ contract GitlawbNameRegistry {
 
     /// Update the DID associated with a name. Only the current owner can call.
     function update(string calldata name, string calldata newDid) external {
+        if (bytes(newDid).length == 0) revert EmptyDID(); // PR #8 fix
         bytes32 nameHash = keccak256(bytes(name));
         NameRecord storage rec = _records[nameHash];
         if (rec.owner == address(0)) revert NotRegistered(nameHash);
         if (rec.owner != msg.sender) revert NotOwner(nameHash, msg.sender);
 
-        // Remove old reverse mapping
+        bytes32 newDidHash = keccak256(bytes(newDid));
         bytes32 oldDidHash = keccak256(bytes(rec.did));
-        delete didToName[oldDidHash];
+
+        // PR #8 fix : if the new DID is already mapped to a DIFFERENT name,
+        // reject. Same-DID self-updates (newDid == oldDid) are allowed as a
+        // no-op for callers that want to refresh updatedAt.
+        if (newDidHash != oldDidHash && bytes(didToName[newDidHash]).length != 0) {
+            revert DIDAlreadyClaimed(newDidHash);
+        }
+
+        // Remove old reverse mapping (no-op if same DID)
+        if (newDidHash != oldDidHash) {
+            delete didToName[oldDidHash];
+        }
 
         rec.did = newDid;
         rec.updatedAt = block.timestamp;
 
-        // Add new reverse mapping
-        bytes32 newDidHash = keccak256(bytes(newDid));
         didToName[newDidHash] = name;
 
         emit NameUpdated(name, newDid, msg.sender, block.timestamp);
