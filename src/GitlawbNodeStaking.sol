@@ -3,6 +3,13 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "lib/forge-std/src/interfaces/IERC20.sol";
 
+/// PR #9 fix : minimal interface to the DID registry so registerNode can
+/// require the caller is the registered DID owner. Closes the squatting
+/// surface where any address could grab a high-value DID hash.
+interface IDIDRegistryView {
+    function didToOwner(bytes32 didHash) external view returns (address);
+}
+
 /// @title GitlawbNodeStaking
 /// @notice Proof-of-Stake for gitlawb node operators on Base L2.
 ///
@@ -44,9 +51,20 @@ contract GitlawbNodeStaking {
     IERC20 public immutable token;
     address public owner;
 
+    /// PR #9 fix : optional DID registry binding. When set, registerNode
+    /// requires msg.sender to be the registered owner of nodeDidHash —
+    /// stops free DID squatting. Zero address keeps the legacy behavior
+    /// for protocols that don't use the DID registry.
+    IDIDRegistryView public didRegistry;
+
     /// nodeDidHash = keccak256(bytes(nodeDid))
     mapping(bytes32 => Node) public nodes;
     bytes32[] public nodeIds;
+
+    /// PR #9 fix : index into nodeIds for each registered DID (1-based; 0 = not present).
+    /// Lets unstake() remove the entry via swap-and-pop instead of leaving dead
+    /// slots that re-loop forever in depositRevenue.
+    mapping(bytes32 => uint256) private nodeIdIndex;
 
     /// Sum of stake across currently-active (heartbeat'd within threshold) nodes.
     /// Updated lazily — on deposit we rebuild from live heartbeats.
@@ -81,6 +99,7 @@ contract GitlawbNodeStaking {
     error NoActiveStake();
     error TransferFailed();
     error ZeroAddress();
+    error NotDIDOwner(); // PR #9
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -103,6 +122,13 @@ contract GitlawbNodeStaking {
         Node storage n = nodes[nodeDidHash];
         if (n.operator != address(0)) revert AlreadyRegistered();
 
+        // PR #9 fix : if a DID registry is configured, the caller MUST own
+        // the DID being registered as a node. Stops free squatting of
+        // high-value DIDs by random addresses.
+        if (address(didRegistry) != address(0)) {
+            if (didRegistry.didToOwner(nodeDidHash) != msg.sender) revert NotDIDOwner();
+        }
+
         bool ok = token.transferFrom(msg.sender, address(this), stakeAmount);
         if (!ok) revert TransferFailed();
 
@@ -116,6 +142,7 @@ contract GitlawbNodeStaking {
         n.rewardDebt = (stakeAmount * accRewardPerShare) / ACC_PRECISION;
 
         nodeIds.push(nodeDidHash);
+        nodeIdIndex[nodeDidHash] = nodeIds.length; // 1-based (PR #9 fix)
         totalRegisteredStake += stakeAmount;
         totalActiveStake += stakeAmount;
 
@@ -183,6 +210,25 @@ contract GitlawbNodeStaking {
             totalActiveStake -= stakeAmount;
         }
         totalRegisteredStake -= stakeAmount;
+
+        // PR #9 fix : swap-and-pop the entry out of nodeIds so subsequent
+        // depositRevenue() iterations don't keep paying gas for an empty slot.
+        // Without this, every full lifecycle (register → unstake) leaves a
+        // permanent dead entry. Over a year of operator churn this turns
+        // depositRevenue into an unbounded gas DoS even though active count
+        // stays bounded.
+        uint256 idx1 = nodeIdIndex[nodeDidHash];
+        if (idx1 != 0) {
+            uint256 last = nodeIds.length - 1;
+            uint256 idx = idx1 - 1;
+            if (idx != last) {
+                bytes32 moved = nodeIds[last];
+                nodeIds[idx] = moved;
+                nodeIdIndex[moved] = idx + 1;
+            }
+            nodeIds.pop();
+            nodeIdIndex[nodeDidHash] = 0;
+        }
 
         // Wipe node
         n.stake = 0;
@@ -368,6 +414,13 @@ contract GitlawbNodeStaking {
     }
 
     // ── Admin ────────────────────────────────────────────────────────────────
+
+    /// PR #9 fix : bind/unbind the DID registry. Once bound, registerNode
+    /// enforces DID ownership. Settable by owner only.
+    function setDIDRegistry(address _registry) external {
+        if (msg.sender != owner) revert NotOwner();
+        didRegistry = IDIDRegistryView(_registry);
+    }
 
     function transferOwnership(address newOwner) external {
         if (msg.sender != owner) revert NotOwner();
