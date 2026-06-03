@@ -42,9 +42,24 @@ contract GitlawbFeeDistributor {
     uint256 public constant MAX_BPS_CHANGE = 500; // owner can shift at most 5% per update
     uint256 public constant MIN_DISTRIBUTION = 1e18; // 1 token — dust gate
 
+    /// PR #10 fix : floor on keeperShareBps so owner can't rug keepers to 0
+    /// (which would stop the permissionless cron and force distributions
+    /// through owner-controlled paths).
+    uint256 public constant MIN_KEEPER_SHARE_BPS = 25; // 0.25% — small but non-zero
+
+    /// PR #10 fix : timelock on setSinks. Owner queues a swap; it executes
+    /// only after SINK_TIMELOCK has elapsed. Gives stakers a window to exit
+    /// if the new sink is malicious.
+    uint256 public constant SINK_TIMELOCK = 2 days;
+
     uint256 public lastDistribution;
     uint256 public totalDistributed;
     uint256 public distributionCount;
+
+    /// PR #10 fix : queued sink swap. pendingSinksEta == 0 means no pending change.
+    address public pendingNodeStaking;
+    address public pendingUserStaking;
+    uint256 public pendingSinksEta;
 
     // ── Events ───────────────────────────────────────────────────────────────
 
@@ -58,6 +73,8 @@ contract GitlawbFeeDistributor {
     );
     event SplitUpdated(uint256 nodeShareBps, uint256 userShareBps, uint256 keeperShareBps);
     event SinksUpdated(address nodeStaking, address userStaking);
+    event SinksQueued(address nodeStaking, address userStaking, uint256 eta); // PR #10
+    event SinksCancelled(); // PR #10
 
     // ── Errors ───────────────────────────────────────────────────────────────
 
@@ -68,6 +85,9 @@ contract GitlawbFeeDistributor {
     error ChangeTooLarge();
     error ZeroAddress();
     error TransferFailed();
+    error KeeperShareTooLow(); // PR #10
+    error NoPendingSinks(); // PR #10
+    error TimelockNotElapsed(); // PR #10
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -167,6 +187,10 @@ contract GitlawbFeeDistributor {
         if (_diff(_userBps, userShareBps) > MAX_BPS_CHANGE) revert ChangeTooLarge();
         if (_diff(_keeperBps, keeperShareBps) > MAX_BPS_CHANGE) revert ChangeTooLarge();
 
+        // PR #10 fix : enforce a non-zero floor on keeperShareBps so the
+        // owner can't strand the permissionless cron over multiple updates.
+        if (_keeperBps < MIN_KEEPER_SHARE_BPS) revert KeeperShareTooLow();
+
         nodeShareBps = _nodeBps;
         userShareBps = _userBps;
         keeperShareBps = _keeperBps;
@@ -174,12 +198,40 @@ contract GitlawbFeeDistributor {
         emit SplitUpdated(_nodeBps, _userBps, _keeperBps);
     }
 
-    function setSinks(address _nodeStaking, address _userStaking) external {
+    /// PR #10 fix : sink swap is now a two-step process gated by SINK_TIMELOCK.
+    /// Step 1 (queue) sets pendingSinks + eta. Step 2 (execute) applies them
+    /// once eta has passed. Stakers can use the window to exit if the new
+    /// sink is malicious. Owner can cancel a pending swap before execution.
+    function queueSinks(address _nodeStaking, address _userStaking) external {
         if (msg.sender != owner) revert NotOwner();
         if (_nodeStaking == address(0) || _userStaking == address(0)) revert ZeroAddress();
-        nodeStaking = IRevenueSink(_nodeStaking);
-        userStaking = IRevenueSink(_userStaking);
-        emit SinksUpdated(_nodeStaking, _userStaking);
+        pendingNodeStaking = _nodeStaking;
+        pendingUserStaking = _userStaking;
+        pendingSinksEta = block.timestamp + SINK_TIMELOCK;
+        emit SinksQueued(_nodeStaking, _userStaking, pendingSinksEta);
+    }
+
+    function executeSinks() external {
+        if (msg.sender != owner) revert NotOwner();
+        if (pendingSinksEta == 0) revert NoPendingSinks();
+        if (block.timestamp < pendingSinksEta) revert TimelockNotElapsed();
+        address _node = pendingNodeStaking;
+        address _user = pendingUserStaking;
+        nodeStaking = IRevenueSink(_node);
+        userStaking = IRevenueSink(_user);
+        pendingNodeStaking = address(0);
+        pendingUserStaking = address(0);
+        pendingSinksEta = 0;
+        emit SinksUpdated(_node, _user);
+    }
+
+    function cancelSinks() external {
+        if (msg.sender != owner) revert NotOwner();
+        if (pendingSinksEta == 0) revert NoPendingSinks();
+        pendingNodeStaking = address(0);
+        pendingUserStaking = address(0);
+        pendingSinksEta = 0;
+        emit SinksCancelled();
     }
 
     function transferOwnership(address newOwner) external {
