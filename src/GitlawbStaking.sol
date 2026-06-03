@@ -134,6 +134,9 @@ contract GitlawbStaking {
         if (info.unstakeAmount == 0) revert NoPendingUnstake();
         if (block.timestamp < info.unstakeRequestAt + COOLDOWN_PERIOD) revert CooldownNotElapsed();
 
+        // Harvest pending rewards before changing stake (mirrors stake/requestUnstake/claimRewards)
+        _harvest(msg.sender);
+
         uint256 amount = info.unstakeAmount;
 
         // Remove old weighted stake
