@@ -37,6 +37,7 @@ contract GitlawbBounty {
         uint256 submittedAt;
         uint256 completedAt;
         uint256 deadline;        // seconds from claim — auto-dispute after
+        uint256 claimDeposit;    // PR #6 : refundable deposit posted by claimant on claim
     }
 
     // ── Storage ──────────────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ contract GitlawbBounty {
     address public treasury;
     address public owner;
     uint256 public protocolFeeBps; // basis points (500 = 5%)
+    /// PR #6 fix : refundable claim deposit (basis points of bounty amount)
+    uint256 public claimDepositBps;
     uint256 public nextBountyId;
     uint256 public defaultDeadline; // seconds (default 7 days)
 
@@ -69,6 +72,7 @@ contract GitlawbBounty {
     event BountyDisputed(uint256 indexed bountyId);
     event TreasuryUpdated(address indexed newTreasury);
     event FeeUpdated(uint256 newFeeBps);
+    event ClaimDepositBpsUpdated(uint256 newBps); // PR #6
 
     // ── Errors ───────────────────────────────────────────────────────────────
 
@@ -106,6 +110,7 @@ contract GitlawbBounty {
         treasury = _treasury;
         owner = msg.sender;
         protocolFeeBps = 500; // 5%
+        claimDepositBps = 100; // 1% refundable deposit (PR #6)
         defaultDeadline = 7 days;
     }
 
@@ -154,10 +159,23 @@ contract GitlawbBounty {
         string calldata agentDid
     ) external inStatus(bountyId, Status.Open) {
         Bounty storage b = bounties[bountyId];
+
+        // PR #6 fix : require refundable claim deposit. Stops the
+        // indefinite DoS where any address claims any bounty for free,
+        // lets the deadline expire, and re-claims after dispute.
+        // Deposit is refunded on submitBounty, slashed to treasury on
+        // disputeBounty (claimant missed deadline).
+        uint256 deposit = (b.amount * claimDepositBps) / 10_000;
+        if (deposit > 0) {
+            bool dok = token.transferFrom(msg.sender, address(this), deposit);
+            if (!dok) revert TransferFailed();
+        }
+
         b.claimantDid = agentDid;
         b.claimantAddress = msg.sender;
         b.claimedAt = block.timestamp;
         b.status = Status.Claimed;
+        b.claimDeposit = deposit;
 
         emit BountyClaimed(bountyId, agentDid, msg.sender);
     }
@@ -174,6 +192,14 @@ contract GitlawbBounty {
         b.prId = prId;
         b.submittedAt = block.timestamp;
         b.status = Status.Submitted;
+
+        // PR #6 fix : refund the claim deposit on timely submission.
+        if (b.claimDeposit > 0) {
+            uint256 refund = b.claimDeposit;
+            b.claimDeposit = 0;
+            bool rok = token.transfer(msg.sender, refund);
+            if (!rok) revert TransferFailed();
+        }
 
         emit BountySubmitted(bountyId, prId);
     }
@@ -235,6 +261,15 @@ contract GitlawbBounty {
         }
         if (block.timestamp <= b.claimedAt + b.deadline) {
             revert DeadlineNotExceeded(bountyId);
+        }
+
+        // PR #6 fix : slash the claim deposit to treasury since the claimant
+        // missed the deadline. Makes spam-claiming economically lossy.
+        if (b.claimDeposit > 0 && treasury != address(0)) {
+            uint256 slashed = b.claimDeposit;
+            b.claimDeposit = 0;
+            bool sok = token.transfer(treasury, slashed);
+            if (!sok) revert TransferFailed();
         }
 
         b.status = Status.Open;
@@ -299,6 +334,12 @@ contract GitlawbBounty {
         if (_treasury == address(0)) revert ZeroAddress();
         treasury = _treasury;
         emit TreasuryUpdated(_treasury);
+    }
+
+    function setClaimDepositBps(uint256 _bps) external onlyOwner {
+        require(_bps <= 2000, "deposit too high"); // max 20% of bounty
+        claimDepositBps = _bps;
+        emit ClaimDepositBpsUpdated(_bps);
     }
 
     function setProtocolFee(uint256 _feeBps) external onlyOwner {
