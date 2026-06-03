@@ -226,35 +226,35 @@ contract GitlawbNodeStaking {
     function depositRevenue(uint256 amount) external {
         if (amount == 0) revert InvalidAmount();
 
-        // Refresh active stake snapshot before distributing
-        _refreshActiveStake();
-        uint256 activeStake = totalActiveStake;
-        if (activeStake == 0) revert NoActiveStake();
-
         bool ok = token.transferFrom(msg.sender, address(this), amount);
         if (!ok) revert TransferFailed();
 
+        // PR #7 fix : was 3 separate O(n) loops over nodeIds. The pre-harvest
+        // loop is redundant — accRewardPerShare hasn't been bumped yet, so
+        // _harvest would either no-op or duplicate the lazy checkpoint
+        // already done at stake/unstake/claim time. Removing it cuts gas by
+        // ~33% per deposit at scale. The two remaining passes are fused
+        // logically: one computes activeStake, the other seals inactive
+        // nodes against the new bump.
         uint256 len = nodeIds.length;
-
-        // 1. Harvest every node with the PRE-update accRewardPerShare. Active
-        //    nodes get their prior accrual credited to pendingRewards; inactive
-        //    nodes with no prior accrual no-op (their debt already equals acc).
+        uint256 activeStake = 0;
         for (uint256 i = 0; i < len; i++) {
-            _harvest(nodeIds[i]);
+            Node storage n = nodes[nodeIds[i]];
+            if (_isActive(n)) activeStake += n.stake;
         }
+        if (activeStake == 0) revert NoActiveStake();
+        totalActiveStake = activeStake;
 
-        // 2. Bump accRewardPerShare for this deposit.
-        accRewardPerShare += (amount * ACC_PRECISION) / activeStake;
+        uint256 bump = (amount * ACC_PRECISION) / activeStake;
+        accRewardPerShare += bump;
         totalRewardsDistributed += amount;
 
-        // 3. Seal inactive nodes against the new acc — advance their rewardDebt
-        //    so this deposit's bump is NOT counted as their earnings when they
-        //    next interact. Active nodes are left alone; they'll earn their
-        //    share at next harvest.
+        // Seal inactive nodes against this deposit's bump so they can't claim
+        // its share at next harvest.
         for (uint256 i = 0; i < len; i++) {
             Node storage n = nodes[nodeIds[i]];
             if (n.stake > 0 && !_isActive(n)) {
-                n.rewardDebt = (n.stake * accRewardPerShare) / ACC_PRECISION;
+                n.rewardDebt += (n.stake * bump) / ACC_PRECISION;
             }
         }
 
