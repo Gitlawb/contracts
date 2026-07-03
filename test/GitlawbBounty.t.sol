@@ -11,6 +11,7 @@ contract GitlawbBountyTest is Test {
 
     address treasury = address(0xFEE);
     address creator  = address(0xA11CE);
+    address delegate = address(0xDE1E6A7E);
     address agent    = address(0xA6E47);
     address anyone   = address(0xBAD);
 
@@ -150,6 +151,47 @@ contract GitlawbBountyTest is Test {
         assertEq(fees, expectedFee);
     }
 
+    function test_fullFlow_createClaimSubmitApprove_AsDelegate() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.prank(agent);
+        bounty.claimBounty(id, AGENT_DID);
+
+        vm.prank(agent);
+        bounty.submitBounty(id, PR_ID);
+
+        uint256 agentBalBefore = token.balanceOf(agent);
+        uint256 treasuryBalBefore = token.balanceOf(treasury);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        vm.prank(delegate);
+        bounty.approveBounty(id);
+
+        // 5% fee = 5,000 tokens, payout = 95,000 tokens
+        uint256 expectedFee = (AMOUNT * 500) / 10000;
+        uint256 expectedPayout = AMOUNT - expectedFee;
+
+        assertEq(token.balanceOf(agent) - agentBalBefore, expectedPayout);
+        assertEq(token.balanceOf(treasury) - treasuryBalBefore, expectedFee);
+
+        (,,, GitlawbBounty.Status status,,) = bounty.getBountyCore(id);
+        assertEq(uint8(status), uint8(GitlawbBounty.Status.Completed));
+
+        // Agent stats
+        (uint256 earnings, uint256 count) = bounty.getAgentStats(AGENT_DID);
+        assertEq(earnings, expectedPayout);
+        assertEq(count, 1);
+
+        // Protocol stats
+        (uint256 total, uint256 paid, uint256 fees) = bounty.getProtocolStats();
+        assertEq(total, 1);
+        assertEq(paid, expectedPayout);
+        assertEq(fees, expectedFee);
+    }
+
     // ── cancelBounty ────────────────────────────────────────────────────────
 
     function test_cancelBounty() public {
@@ -159,6 +201,23 @@ contract GitlawbBountyTest is Test {
         uint256 balBefore = token.balanceOf(creator);
 
         vm.prank(creator);
+        bounty.cancelBounty(id);
+
+        assertEq(token.balanceOf(creator) - balBefore, AMOUNT);
+
+        (,,, GitlawbBounty.Status status,,) = bounty.getBountyCore(id);
+        assertEq(uint8(status), uint8(GitlawbBounty.Status.Cancelled));
+    }
+
+    function test_cancelBounty_AsDelegate() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        uint256 balBefore = token.balanceOf(creator);
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        vm.prank(delegate);
         bounty.cancelBounty(id);
 
         assertEq(token.balanceOf(creator) - balBefore, AMOUNT);
@@ -181,6 +240,23 @@ contract GitlawbBountyTest is Test {
         bounty.cancelBounty(id);
     }
 
+    function test_cancelBounty_revertsIfClaimed_AsDelegate() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.prank(agent);
+        bounty.claimBounty(id, AGENT_DID);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        vm.expectRevert(abi.encodeWithSelector(
+            GitlawbBounty.InvalidStatus.selector, id, GitlawbBounty.Status.Open, GitlawbBounty.Status.Claimed
+        ));
+        vm.prank(delegate);
+        bounty.cancelBounty(id);
+    }
+    
     // ── disputeBounty ───────────────────────────────────────────────────────
 
     function test_disputeBounty_afterDeadline() public {
@@ -231,4 +307,122 @@ contract GitlawbBountyTest is Test {
         bounty.setTreasury(newTreasury);
         assertEq(bounty.treasury(), newTreasury);
     }
+
+    function test_addBountyManagementDelegate() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.startPrank(creator);
+        vm.expectEmit(true, true, false, false);
+        emit GitlawbBounty.BountyManagementDelegateAdded(id, delegate);
+        bounty.addBountyManagementDelegate(id, delegate);
+        vm.stopPrank();
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+    }
+
+    function test_addBountyManagementDelegate_idempotent() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+    }
+
+
+    function test_addBountyManagementDelegate_IfNotBountyCreator_empty() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.startPrank(anyone);
+        vm.expectRevert(abi.encodeWithSelector(GitlawbBounty.NotBountyCreator.selector, id));
+        bounty.addBountyManagementDelegate(id, delegate);
+        vm.stopPrank();
+    }
+
+    function test_addBountyManagementDelegate_IfNotBountyCreator_filled() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+
+        vm.startPrank(anyone);
+        vm.expectRevert(abi.encodeWithSelector(GitlawbBounty.NotBountyCreator.selector, id));
+        bounty.addBountyManagementDelegate(id, delegate);
+        vm.stopPrank();
+    }
+
+    function test_removeBountyDelegate() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.startPrank(creator);
+        vm.expectEmit(true, true, false, false);
+        emit GitlawbBounty.BountyManagementDelegateAdded(id, delegate);
+        bounty.addBountyManagementDelegate(id, delegate);
+        vm.stopPrank();
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+
+        vm.prank(creator);
+        bounty.removeBountyDelegate(id, delegate);
+        delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 0);
+        vm.stopPrank();
+    }
+
+    function test_removeBountyDelegate_IfNotBountyCreator_empty() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.startPrank(anyone);
+        vm.expectRevert(abi.encodeWithSelector(GitlawbBounty.NotBountyCreator.selector, id));
+        bounty.removeBountyDelegate(id, delegate);
+        vm.stopPrank();
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 0);
+    }
+
+    function test_removeBountyDelegate_IfNotBountyCreator_filled() public {
+        vm.prank(creator);
+        uint256 id = bounty.createBounty(AMOUNT, REPO_OWNER, REPO_NAME, ISSUE_ID, TITLE);
+
+        vm.prank(creator);
+        bounty.addBountyManagementDelegate(id, delegate);
+
+        address[] memory delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+
+        vm.startPrank(anyone);
+        vm.expectRevert(abi.encodeWithSelector(GitlawbBounty.NotBountyCreator.selector, id));
+        bounty.removeBountyDelegate(id, delegate);
+        vm.stopPrank();
+
+        delegates = bounty.bountyDelegates(id);
+        assertEq(delegates.length, 1);
+        assertEq(delegates[0], delegate);
+    }
+
 }
