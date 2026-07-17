@@ -1,7 +1,10 @@
 # Foundry
 cache/
 out/
-broadcast/*/*/
+# Ignore per-run artifacts but keep the canonical deploy record per chain.
+# (Must exclude *contents*, not the directory itself — a file inside an
+# excluded directory can never be re-included by a negation.)
+broadcast/*/*/*
 !broadcast/*/*/run-latest.json
 .forge-snapshots/
 
