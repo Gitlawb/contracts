@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "lib/forge-std/src/interfaces/IERC20.sol";
+import {EnumerableSet} from "./utils/EnumerableSet.sol";
 
 /// @title GitlawbBounty
 /// @notice Token-powered bounty marketplace for AI agents on Base L2.
@@ -10,6 +11,7 @@ import {IERC20} from "lib/forge-std/src/interfaces/IERC20.sol";
 /// Agents claim bounties, submit PRs, and get paid on approval.
 /// Protocol takes a 5% fee on every completed bounty.
 contract GitlawbBounty {
+    using EnumerableSet for EnumerableSet.AddressSet;
     // ── Types ────────────────────────────────────────────────────────────────
 
     enum Status {
@@ -49,6 +51,7 @@ contract GitlawbBounty {
     uint256 public defaultDeadline; // seconds (default 7 days)
 
     mapping(uint256 => Bounty) public bounties;
+    mapping(uint256 bountyId => EnumerableSet.AddressSet delegateAddresses) private _bountyManagementDelegates;
 
     /// Track total earnings per agent DID (keccak256 hash)
     mapping(bytes32 => uint256) public agentEarnings;
@@ -62,6 +65,8 @@ contract GitlawbBounty {
     // ── Events ───────────────────────────────────────────────────────────────
 
     event BountyCreated(uint256 indexed bountyId, address indexed creator, uint256 amount, string repoOwner, string repoName, string issueId, string title);
+    event BountyManagementDelegateAdded(uint256 indexed bountyId, address indexed delegate);
+    event BountyManagementDelegateRemoved(uint256 indexed bountyId, address indexed delegate);
     event BountyClaimed(uint256 indexed bountyId, string claimantDid, address indexed claimantAddress);
     event BountySubmitted(uint256 indexed bountyId, string prId);
     event BountyCompleted(uint256 indexed bountyId, address indexed claimant, uint256 payout, uint256 fee);
@@ -74,6 +79,7 @@ contract GitlawbBounty {
 
     error NotOwner();
     error NotBountyCreator(uint256 bountyId);
+    error NotBountyCreatorOrDelegate(uint256 bountyId);
     error InvalidAmount();
     error InvalidStatus(uint256 bountyId, Status expected, Status actual);
     error DeadlineExceeded(uint256 bountyId);
@@ -90,6 +96,13 @@ contract GitlawbBounty {
 
     modifier onlyBountyCreator(uint256 bountyId) {
         if (msg.sender != bounties[bountyId].creator) revert NotBountyCreator(bountyId);
+        _;
+    }
+
+    modifier onlyBountyCreatorOrDelegate(uint256 bountyId) {
+        if (msg.sender != bounties[bountyId].creator && !_bountyManagementDelegates[bountyId].contains(msg.sender)) {
+            revert NotBountyCreatorOrDelegate(bountyId);
+        }
         _;
     }
 
@@ -110,6 +123,10 @@ contract GitlawbBounty {
     }
 
     // ── Core functions ───────────────────────────────────────────────────────
+
+    function bountyDelegates(uint256 bountyId) external view returns (address[] memory delegates) {
+        return _bountyManagementDelegates[bountyId].values();
+    }
 
     /// Create a bounty — escrows `amount` $GITLAWB from msg.sender.
     /// Caller must have approved this contract for `amount` tokens first.
@@ -148,6 +165,16 @@ contract GitlawbBounty {
         emit BountyCreated(bountyId, msg.sender, amount, repoOwner, repoName, issueId, title);
     }
 
+    function addBountyManagementDelegate(uint256 bountyId, address delegate) external onlyBountyCreator(bountyId) {
+        _bountyManagementDelegates[bountyId].add(delegate);
+        emit BountyManagementDelegateAdded(bountyId, delegate);
+    }
+
+    function removeBountyDelegate(uint256 bountyId, address delegate) external onlyBountyCreator(bountyId) {
+        _bountyManagementDelegates[bountyId].remove(delegate);
+        emit BountyManagementDelegateRemoved(bountyId, delegate);
+    }
+
     /// Agent claims an open bounty. Starts the deadline clock.
     function claimBounty(
         uint256 bountyId,
@@ -181,7 +208,7 @@ contract GitlawbBounty {
     /// Bounty creator approves completion — releases funds to agent minus protocol fee.
     function approveBounty(
         uint256 bountyId
-    ) external onlyBountyCreator(bountyId) inStatus(bountyId, Status.Submitted) {
+    ) external onlyBountyCreatorOrDelegate(bountyId) inStatus(bountyId, Status.Submitted) {
         Bounty storage b = bounties[bountyId];
 
         uint256 fee = (b.amount * protocolFeeBps) / 10000;
@@ -213,7 +240,7 @@ contract GitlawbBounty {
     /// Cancel an open (unclaimed) bounty — refunds creator.
     function cancelBounty(
         uint256 bountyId
-    ) external onlyBountyCreator(bountyId) inStatus(bountyId, Status.Open) {
+    ) external onlyBountyCreatorOrDelegate(bountyId) inStatus(bountyId, Status.Open) {
         Bounty storage b = bounties[bountyId];
         b.status = Status.Cancelled;
 
